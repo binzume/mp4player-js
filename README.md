@@ -1,4 +1,4 @@
-# mp4.js [WIP]
+# mp4player.js [WIP]
 
 Fetch APIでmp4を読み込み，ブラウザ上でfragmented mp4に変換しながら Media Source Extensions APIで再生するやつ．
 
@@ -8,14 +8,16 @@ Fetch APIでmp4を読み込み，ブラウザ上でfragmented mp4に変換しな
 - FetchやXHRで読み込んでblobを再生 → 読み込み完了まで再生できない
 - MPEG-DASHなどFragmented mp4にする → 事前の変換が必要
 
-今の所 PoC レベルなので，とりあえず再生開始できるだけです．
+今の所 PoC レベルなので，とりあえず再生できるだけです．
+
+Test page : https://binzume.github.io/mp4player-js/index.html
 
 ## TODO
 
 - シーク対応
 - バッファリング
-- リクエスト回数減らす
 - まともな実装にする
+- パフォーマンスの改善
 
 # License
 
