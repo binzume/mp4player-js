@@ -25,6 +25,9 @@ class BufferedReader {
         return this.bufferdSize - this.currentBufferPos;
     }
     seek(p) {
+        if (this.reader && this.reader.cancel) {
+            this.reader.cancel();
+        }
         this.position = p;
         this.buffers = [];
         this.currentBuffer = null;
