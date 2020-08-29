@@ -1,6 +1,6 @@
 "use strict";
 class BufferedReader {
-    constructor() {
+    constructor(options = {}) {
         this.littleEndian = false;
         this.buffers = [];
         this.bufferdSize = 0;
@@ -13,7 +13,8 @@ class BufferedReader {
         this.tmpBuffer = new ArrayBuffer(8);
         this.tmpDataView = new DataView(this.tmpBuffer);
         this.tmpBytes = new Uint8Array(this.tmpBuffer);
-        this.reader = null;
+        this.reader = options.reader || null;
+        this.opener = options.opener || null;
     }
     setReader(r) {
         this.reader = r;
@@ -902,14 +903,12 @@ class MP4Player {
                 console.log(output, output.updateSize());
                 await output.write(w);
 
-                // console.log("append");
-                // let br = new BufferedReader();
-                // br.appendBuffer(w.buffer);
-                // console.log(await new MP4Container("", 0xfffffff).parse(br));
-                // if (seq > 2) return;
-                if (seq == -2) {
-                    document.body.innerHTML += "<a href=" + URL.createObjectURL(new Blob([w.bytes.slice()])) + ">segment " + seq + " </a><br />";
-                }
+                //if (seq == 1) {
+                //    let br = new BufferedReader();
+                //    br.appendBuffer(w.buffer);
+                //    console.log(await new MP4Container("", 0xfffffff).parse(br));
+                //    document.body.innerHTML += "<a href=" + URL.createObjectURL(new Blob([w.bytes.slice()])) + ">segment " + seq + " </a><br />";
+                //}
 
                 sourceBuffer.appendBuffer(w.buffer);
             }
@@ -946,13 +945,14 @@ window.addEventListener('DOMContentLoaded', async (ev) => {
     let videoEl = document.querySelector('video');
     videoEl.addEventListener('error', ev => console.log(ev));
 
-    let videoUrl = 'bunny.mp4';
+    let videoUrl = 'videos/bunny.mp4';
 
-    let br = new BufferedReader();
-    br.setOpener({
-        async open(p) {
-            return (await fetch(videoUrl, p ? { headers: { 'range': 'bytes=' + p + '-' } } : {})).body.getReader();
+    let options = {
+        opener: {
+            async open(pos) {
+                return (await fetch(videoUrl, pos ? { headers: { 'range': 'bytes=' + pos + '-' } } : {})).body.getReader();
+            }
         }
-    });
-    new MP4Player(videoEl).playBufferedReader(br);
+    };
+    new MP4Player(videoEl).playBufferedReader(new BufferedReader(options));
 }, { once: true });
