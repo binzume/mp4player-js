@@ -16,12 +16,6 @@ class BufferedReader {
         this.reader = options.reader || null;
         this.opener = options.opener || null;
     }
-    setReader(r) {
-        this.reader = r;
-    }
-    setOpener(rf) {
-        this.opener = rf;
-    }
     available() {
         return this.bufferdSize - this.currentBufferPos;
     }
@@ -709,7 +703,7 @@ class Mp4SampleReader {
         let mdhd = track.findByType('mdhd');
         this.timeScale = mdhd.version ? mdhd.r32(16) : mdhd.r32(8); // TODO
         this.position = 0;
-        this.read_offset = 0;
+        this.readOffset = 0;
         this.lastChunk = -1;
         this.mdatOffset = mdatOffset || 0;
     }
@@ -719,28 +713,28 @@ class Mp4SampleReader {
     seek(sample) {
         this.lastChunk = this.stsc.sampleToChunk(sample);
         this.position = sample;
-        this.read_offset = 0;
+        this.readOffset = 0;
         while (sample > 0) {
             sample--;
             if (this.stsc.sampleToChunk(sample) != this.lastChunk) break;
-            this.read_offset += this.stsz.sampleSize(sample);
+            this.readOffset += this.stsz.sampleSize(sample);
         }
     }
     readSampleInfo() {
         let chunk = this.currentChunk();
         if (this.lastChunk != chunk) {
             this.lastChunk = chunk;
-            this.read_offset = 0;
+            this.readOffset = 0;
         }
         let sampleInfo = {
             timestamp: this.stts.sampleToTime(this.position),
             timeOffset: this.ctts ? this.ctts.sampleToOffset(this.position) : null,
             syncPoint: this.isSyncPoint(),
             size: this.stsz.sampleSize(this.position),
-            offset: this.stco.offset(chunk) + this.read_offset - this.mdatOffset,
+            offset: this.stco.offset(chunk) + this.readOffset - this.mdatOffset,
             chunk: chunk,
         };
-        this.read_offset += sampleInfo.size;
+        this.readOffset += sampleInfo.size;
         this.position++;
         return sampleInfo;
     }
@@ -748,58 +742,60 @@ class Mp4SampleReader {
 
 class Mp4FragmentBuilder {
     constructor(track, seq) {
-        this.moof = new SimpleBoxList("moof", 0);
-        let mfhd = new BoxMFHD();
-        mfhd.sequenceNumber = seq;
-        this.moof.children.push(mfhd);
-        let traf = new SimpleBoxList("traf", 0);
-        this.moof.children.push(traf);
-        let tfhd = new BoxTFHD();
-        tfhd.flags |= BoxTFHD.FLAG_DEFAULT_SIZE | BoxTFHD.FLAG_DEFAULT_FLAGS; // ffmpeg compat
-        tfhd.defaultSize = 0;
-        tfhd.defaultFlags = SAMPLE_FLAGS_NO_SYNC;
-        tfhd.trackId = track;
-        this.tfhd = tfhd;
-        traf.children.push(tfhd);
-
-        this.tfdt = new BoxTFDT();
-        traf.children.push(this.tfdt);
-        let trun = new BoxTRUN();
-        traf.children.push(trun);
-        trun.flags = BoxTRUN.FLAG_SAMPLE_SIZE | BoxTRUN.FLAG_SAMPLE_FLAGS
-            | BoxTRUN.FLAG_SAMPLE_CTS | BoxTRUN.FLAG_DATA_OFFSET;
-        this.trun = trun;
-        this.mdatMin = 0xffffffff;
-        this.mdatMax = 0;
+        this.track = track;
+        this.seq = seq;
+        this.mdatStart = 0xffffffff;
+        this.mdatEnd = 0;
         this.totalSize = 0;
         this.samples = [];
         this.lastTimestamp = 0;
     }
     addSample(sample) {
-        this.totalSize += sample.size;
-        this.trun.add(sample.size);
-        this.trun.add(sample.syncPoint ? SAMPLE_FLAGS_SYNC : SAMPLE_FLAGS_NO_SYNC);
-        this.trun.add(sample.timeOffset);
         this.samples.push(sample);
         this.lastTimestamp = sample.timestamp;
+        this.totalSize += sample.size;
+        this.mdatStart = Math.min(sample.offset, this.mdatStart);
+        this.mdatEnd = Math.max(sample.offset + sample.size, this.mdatEnd);
     }
     duration() {
         return this.samples.length < 2 ? 0 : this.lastTimestamp - this.samples[0].timestamp;
     }
-
     build(data, offset) {
+        let moof = new SimpleBoxList("moof", 0);
+        let mfhd = new BoxMFHD();
+        mfhd.sequenceNumber = this.seq;
+        moof.children.push(mfhd);
+        let traf = new SimpleBoxList("traf", 0);
+        moof.children.push(traf);
+        let tfhd = new BoxTFHD();
+        tfhd.flags |= BoxTFHD.FLAG_DEFAULT_SIZE | BoxTFHD.FLAG_DEFAULT_FLAGS; // ffmpeg compat
+        tfhd.defaultSize = 0;
+        tfhd.defaultFlags = SAMPLE_FLAGS_NO_SYNC;
+        tfhd.trackId = this.track;
+        tfhd.defaultDuration = (this.duration() / (this.samples.length - 1)) | 0;
+        traf.children.push(tfhd);
+
+        let tfdt = new BoxTFDT();
+        tfdt.flagStart = this.samples[0].timestamp;
+        traf.children.push(tfdt);
+        let trun = new BoxTRUN();
+        traf.children.push(trun);
+        trun.flags = BoxTRUN.FLAG_SAMPLE_SIZE | BoxTRUN.FLAG_SAMPLE_FLAGS
+            | BoxTRUN.FLAG_SAMPLE_CTS | BoxTRUN.FLAG_DATA_OFFSET;
+
         let mdat = new UnknownBox('mdat', this.totalSize + 8);
         let pos = 0;
         this.samples.forEach(sample => {
+            trun.add(sample.size);
+            trun.add(sample.syncPoint ? SAMPLE_FLAGS_SYNC : SAMPLE_FLAGS_NO_SYNC);
+            trun.add(sample.timeOffset);
             mdat.bytes.set(data.slice(sample.offset - offset, sample.offset - offset + sample.size), pos);
             pos += sample.size;
         });
-        this.trun.dataOffset = this.moof.updateSize() + 8;
-        this.tfhd.defaultDuration = (this.duration() / (this.samples.length - 1)) | 0;
-        this.tfdt.flagStart = this.samples[0].timestamp; // TODO
+        trun.dataOffset = moof.updateSize() + 8;
 
         let box = new MP4Container();
-        box.children.push(this.moof);
+        box.children.push(moof);
         box.children.push(mdat);
         return box;
     }
@@ -808,22 +804,9 @@ class Mp4FragmentBuilder {
 class MP4Player {
     constructor(videoEl) {
         this.videoEl = videoEl;
+        this.codecs = [];
     }
     async playBufferedReader(br) {
-        let videoEl = this.videoEl;
-
-        // TODO
-        let mimeCodec = 'video/mp4; codecs="avc1.4d4020, mp4a.40.2"';
-        if (!MediaSource.isTypeSupported(mimeCodec)) {
-            throw 'Unsupported MIME type or codec: ' + mimeCodec;
-        }
-
-        let mediaSource = new MediaSource();
-        videoEl.src = URL.createObjectURL(mediaSource);
-
-        await new Promise(resolve => mediaSource.addEventListener('sourceopen', resolve, { once: true }));
-        let sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
-
         let perser = new MP4Container();
         let mdatOffset = 8;
         let readers = [];
@@ -831,8 +814,7 @@ class MP4Player {
         let mdatBox = null;
         let mdatPos = 0;
         let seq = 0;
-
-        let read = async () => {
+        let readSegment = async () => {
             await new Promise(resolve => setTimeout(resolve, 500)); // delay for debug.
             let output = new MP4Container();
             let boxes = output.children;
@@ -858,24 +840,22 @@ class MP4Player {
                     if (b.type == 'moov') {
                         let tracks = b.findByTypeAll("trak", []);
                         readers = tracks.map(t => new Mp4SampleReader(t));
+                        this.codecs = this._getCodecs(tracks);
                         this._clearMoov(b, tracks);
                     }
                     boxes.push(b);
                 }
             } else {
-                let trackId = seq % 2 + 1;
+                let trackId = seq % readers.length + 1;
                 let reader = readers[trackId - 1];
                 let builder = new Mp4FragmentBuilder(trackId, ++seq);
-                let mdatStart = 0xffffffff;
-                let mdatEnd = 0;
                 let minDuration = 5 * reader.timeScale;
                 while (builder.duration() < minDuration && !reader.isEos()) {
-                    let sample = reader.readSampleInfo();
-                    mdatStart = Math.min(sample.offset, mdatStart);
-                    mdatEnd = Math.max(sample.offset + sample.size, mdatEnd);
-                    builder.addSample(sample);
+                    builder.addSample(reader.readSampleInfo());
                     // console.log(sample);
                 }
+                let mdatStart = builder.mdatStart;
+                let mdatEnd = builder.mdatEnd;
                 if (builder.duration() > 0) {
                     if (mdatPos > mdatStart) {
                         br.seek(mdatOffset + mdatStart);
@@ -895,27 +875,66 @@ class MP4Player {
                     output = builder.build(data, mdatStart);
                 }
             }
-
             if (output.children.length == 0) {
+                return null;
+            }
+            let w = new BufferWriter(output.updateSize() - 8);
+            console.log(output, output.updateSize());
+            await output.write(w);
+            //if (seq == 1) {
+            //    let br = new BufferedReader();
+            //    br.appendBuffer(w.buffer);
+            //    console.log(await new MP4Container("", 0xfffffff).parse(br));
+            //    document.body.innerHTML += "<a href=" + URL.createObjectURL(new Blob([w.bytes.slice()])) + ">segment " + seq + " </a><br />";
+            //}
+            return w.buffer;
+        }
+        let buffer = await readSegment();
+        if (buffer == null) {
+            throw 'cannnot read init segment';
+        }
+
+        let mimeCodec = 'video/mp4; codecs="' + this.codecs.join(",") + '"';
+        console.log(mimeCodec);
+        if (!MediaSource.isTypeSupported(mimeCodec)) {
+            throw 'Unsupported MIME type or codec: ' + mimeCodec;
+        }
+
+        let mediaSource = new MediaSource();
+        this.videoEl.src = URL.createObjectURL(mediaSource);
+
+        await new Promise(resolve => mediaSource.addEventListener('sourceopen', resolve, { once: true }));
+        let sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
+
+        sourceBuffer.addEventListener('updateend', async () => {
+            let buffer = await readSegment();
+            if (buffer == null) {
                 mediaSource.endOfStream();
             } else {
-                let w = new BufferWriter(output.updateSize() - 8);
-                console.log(output, output.updateSize());
-                await output.write(w);
-
-                //if (seq == 1) {
-                //    let br = new BufferedReader();
-                //    br.appendBuffer(w.buffer);
-                //    console.log(await new MP4Container("", 0xfffffff).parse(br));
-                //    document.body.innerHTML += "<a href=" + URL.createObjectURL(new Blob([w.bytes.slice()])) + ">segment " + seq + " </a><br />";
-                //}
-
-                sourceBuffer.appendBuffer(w.buffer);
+                sourceBuffer.appendBuffer(buffer);
             }
+        });
+        sourceBuffer.appendBuffer(buffer);
 
-        };
-        sourceBuffer.addEventListener('updateend', read);
-        await read();
+    }
+    _readSegment() {
+
+    }
+    _getCodecs(tracks) {
+        return tracks.map(t => {
+            let stsd = t.findByType("stsd");
+            let configSize = stsd.r32(4);
+            let c = String.fromCharCode(stsd.r8(8), stsd.r8(9), stsd.r8(10), stsd.r8(11));
+            if (c == 'mp4a') {
+                c += '.40.2';
+            } else if (c == 'avc1') {
+                // TODO: parse config
+                if (configSize >= 0x67 - 8) {
+                    c += '.' + (stsd.r32(0x63) >> 8).toString(16);
+                }
+            }
+            return c;
+        });
     }
 
     _clearMoov(moov, tracks = null) {
@@ -943,9 +962,9 @@ class MP4Player {
 
 window.addEventListener('DOMContentLoaded', async (ev) => {
     let videoEl = document.querySelector('video');
-    videoEl.addEventListener('error', ev => console.log(ev));
-
     let videoUrl = 'videos/bunny.mp4';
+
+    videoEl.addEventListener('error', ev => console.log('error', ev));
 
     let options = {
         opener: {
