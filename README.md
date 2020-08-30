@@ -14,10 +14,9 @@ Test page : https://binzume.github.io/mp4player-js/index.html
 
 ## TODO
 
-- シーク対応
-- バッファリング
 - まともな実装にする
 - パフォーマンスの改善
+- バッファ管理
 
 # License
 

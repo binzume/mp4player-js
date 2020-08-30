@@ -1,6 +1,8 @@
 "use strict";
 class BufferedReader {
     constructor(options = {}) {
+        this.reader = options.reader || null;
+        this.opener = options.opener || null;
         this.littleEndian = false;
         this.buffers = [];
         this.bufferdSize = 0;
@@ -9,12 +11,11 @@ class BufferedReader {
         this.currentBuffer = null;
         this.currentDataView = null;
         this.currentBufferPos = 0;
+        this.currentRemainings = 0;
 
         this.tmpBuffer = new ArrayBuffer(8);
         this.tmpDataView = new DataView(this.tmpBuffer);
         this.tmpBytes = new Uint8Array(this.tmpBuffer);
-        this.reader = options.reader || null;
-        this.opener = options.opener || null;
     }
     available() {
         return this.bufferdSize - this.currentBufferPos;
@@ -30,6 +31,7 @@ class BufferedReader {
         this.buffers = [];
         this.currentBuffer = null;
         this.bufferdSize = 0;
+        this.currentRemainings = 0;
         this.reader = null;
     }
     async bufferAsync(sz) {
@@ -50,48 +52,43 @@ class BufferedReader {
         return true;
     }
     appendBuffer(buffer) {
-        if (this.currentBuffer === null) {
-            this.currentBuffer = buffer;
-            this.currentDataView = new DataView(this.currentBuffer);
-            this.currentBufferPos = 0;
-        } else {
-            this.buffers.push(buffer);
-        }
+        this.buffers.push(buffer);
         this.bufferdSize += buffer.byteLength;
+        this._checkCurrentBuffer();
     }
-    bufferNext() {
-        this.bufferdSize -= this.currentBuffer.byteLength;
-        this.currentBuffer = this.buffers.shift();
-        this.currentDataView = new DataView(this.currentBuffer);
-        this.currentBufferPos = 0;
+    _checkCurrentBuffer() {
+        if (this.currentRemainings <= 0) {
+            this.bufferdSize -= this.currentBuffer ? this.currentBuffer.byteLength : 0;
+            this.currentBuffer = this.buffers.shift();
+            this.currentDataView = new DataView(this.currentBuffer);
+            this.currentRemainings = this.currentBuffer.byteLength;
+            this.currentBufferPos = 0;
+        }
     }
-    checkBuffer(n) {
+    _getDataView(n) {
         if (this.available() < n) {
             throw "no buffered data";
         }
-        let pos = this.currentBufferPos;
-        if (this.currentBuffer.byteLength == pos) {
-            this.bufferNext();
-            pos = 0;
+        this._checkCurrentBuffer();
+        if (this.currentRemainings >= n) {
+            return [this.currentDataView, this._proceed(n)];
         }
-        return this.currentBuffer.byteLength - pos >= n;
-    }
-    getTmpBuffer(n) {
         this.readBytesTo(this.tmpBytes, 0, n);
-        return this.tmpDataView;
+        return [this.tmpDataView, 0];
+    }
+    _proceed(n) {
+        this.currentRemainings -= n;
+        return (this.currentBufferPos += n) - n;
     }
     readBytesTo(bytes, offset, size) {
         offset = offset || 0;
-        size = size || bytes.length;
+        size = size || bytes.length - offset;
         let p = 0;
         while (p < size) {
-            if (this.currentBuffer.byteLength == this.currentBufferPos) {
-                this.bufferNext();
-            }
-            let l = Math.min(size - p, this.currentBuffer.byteLength - this.currentBufferPos);
-            bytes.set(new Uint8Array(this.currentBuffer, this.currentBufferPos, l), offset + p);
+            this._checkCurrentBuffer();
+            let l = Math.min(size - p, this.currentRemainings);
+            bytes.set(new Uint8Array(this.currentBuffer, this._proceed(l), l), offset + p);
             p += l;
-            this.currentBufferPos += l;
         }
         return bytes;
     }
@@ -99,47 +96,29 @@ class BufferedReader {
         let result = [];
         let p = 0;
         while (p < len) {
-            if (this.currentBuffer.byteLength == this.currentBufferPos) {
-                this.bufferNext();
-            }
-            let l = Math.min(len - p, this.currentBuffer.byteLength - this.currentBufferPos);
-            result.push(new Uint8Array(this.currentBuffer, this.currentBufferPos, l));
+            this._checkCurrentBuffer();
+            let l = Math.min(len - p, this.currentRemainings);
+            result.push(new Uint8Array(this.currentBuffer, this._proceed(l), l));
             p += l;
-            this.currentBufferPos += l;
         }
         return result;
     }
     read8() {
-        const len = 1;
-        if (this.checkBuffer(len)) {
-            this.currentBufferPos += len;
-            return this.currentDataView.getUint8(this.currentBufferPos - len, this.littleEndian);
-        }
-        return this.getTmpBuffer(len).getUint8(0, this.littleEndian);
+        let [v, p] = this._getDataView(1);
+        return v.getUint8(p, this.littleEndian);
     }
     read16() {
-        const len = 2;
-        if (this.checkBuffer(len)) {
-            this.currentBufferPos += len;
-            return this.currentDataView.getUint16(this.currentBufferPos - len, this.littleEndian);
-        }
-        return this.getTmpBuffer(len).getUint16(0, this.littleEndian);
+        let [v, p] = this._getDataView(2);
+        return v.getUint16(p, this.littleEndian);
     }
     read32() {
-        const len = 4;
-        if (this.checkBuffer(len)) {
-            this.currentBufferPos += len;
-            return this.currentDataView.getUint32(this.currentBufferPos - len, this.littleEndian);
-        }
-        return this.getTmpBuffer(len).getUint32(0, this.littleEndian);
+        let [v, p] = this._getDataView(4);
+        return v.getUint32(p, this.littleEndian);
     }
     read64() {
         let left = this.read32();
         let right = this.read32();
         return this.littleEndian ? left + 2 ** 32 * right : 2 ** 32 * left + right;
-    }
-    async read16Async() {
-        retrun(await this.bufferAsync(2)) && this.read16();
     }
     async read32Async() {
         return (await this.bufferAsync(4)) && this.read32();
@@ -180,27 +159,16 @@ class Box {
     constructor(type, size) {
         this.type = type;
         this.size = size;
-        this.children = [];
         this.isFullBox = false;
         this.HEADER_SIZE = 8;
     }
     findByType(type) {
-        if (this.type == type) {
-            return this;
-        }
-        for (let child of this.children) {
-            let found = child.findByType(type);
-            if (found) {
-                return found;
-            }
-        }
-        return null;
+        return this.type == type ? this : null;
     }
     findByTypeAll(type, result) {
         if (this.type == type) {
             result.push(this);
         }
-        this.children.forEach(c => c.findByTypeAll(type, result));
         return result;
     }
     updateSize() { return this.size; }
@@ -219,6 +187,7 @@ class Box {
 class SimpleBoxList extends Box {
     constructor(type, size = 0) {
         super(type, size);
+        this.children = [];
         this._nextBox = null;
         this._buf4 = new Uint8Array(4);
     }
@@ -272,6 +241,25 @@ class SimpleBoxList extends Box {
             b.writeBoxHeader(w);
             await b.write(w);
         }
+    }
+    findByType(type) {
+        if (this.type == type) {
+            return this;
+        }
+        for (let child of this.children) {
+            let found = child.findByType(type);
+            if (found) {
+                return found;
+            }
+        }
+        return null;
+    }
+    findByTypeAll(type, result) {
+        if (this.type == type) {
+            result.push(this);
+        }
+        this.children.forEach(c => c.findByTypeAll(type, result));
+        return result;
     }
 }
 
@@ -374,17 +362,30 @@ class BoxSTTS extends FullBufBox {
     count1(n) { return this.r32(4 + n * 8); }
     delta(n) { return this.r32(4 + n * 8 + 4); }
     sampleToTime(n) { // n: [0..(numSample-1)]
-        let c = this.count();
+        let count = this.count();
         let t = 0;
-        for (let i = 0; i < c; i++) {
-            let count = this.count1(i), d = this.delta(i);
-            if (n < count) {
+        for (let i = 0; i < count; i++) {
+            let c = this.count1(i), d = this.delta(i);
+            if (n < c) {
                 return t + n * d;
             }
-            n -= count;
-            t += count * d;
+            n -= c;
+            t += c * d;
         }
         return t;
+    }
+    timeToSample(t) {
+        let count = this.count();
+        let p = 0;
+        for (let i = 0; i < count; i++) {
+            let c = this.count1(i), d = this.delta(i);
+            if (t < c * d) {
+                return p + (t / d) | 0;
+            }
+            p += c;
+            t -= c * d;
+        }
+        return p;
     }
 }
 
@@ -493,7 +494,6 @@ class BoxTFHD extends FullBox {
 
     constructor(type = "tfhd", size = 0) {
         super(type, size);
-        this.flags = BoxTFHD.FLAG_DEFAULT_BASE_IS_MOOF | BoxTFHD.FLAG_DEFAULT_DURATION | BoxTFHD.FLAG_DEFAULT_SIZE | BoxTFHD.FLAG_DEFAULT_DURATION;
         this.trackId = 1;
         this.defaultDuration = 0;
         this.defaultSize = 0;
@@ -558,7 +558,6 @@ class BoxTFDT extends FullBox {
         return this.size;
     }
 }
-
 
 class BoxTRUN extends FullBox {
     static FLAG_DATA_OFFSET = 0x01;
@@ -647,33 +646,12 @@ class UnknownBox extends Box {
     }
 }
 
-class UnknownBoxRef extends Box {
-    constructor(type, size) {
-        super(type, size);
-    }
-    async parse(r) {
-        this.offset = r.position;
-        r.readData(this.size - this.HEADER_SIZE); // TODO seek
-    }
-    async write(w) {
-        throw "unspported type:" + this.type;
-    }
-}
-
 const SAMPLE_FLAGS_NO_SYNC = 0x01010000;
 const SAMPLE_FLAGS_SYNC = 0x02000000;
 const CONTAINER_BOX = new Set(["moov", "trak", "dts\0", "mdia", "minf", "stbl", "udta", "moof", "traf", "edts", "mvex"]);
-const SIMPLE_BOX = new Set(["ftyp", "free", "styp", 'mdat']);
 const BOXES = {
-    "stco": BoxSTCO,
-    "stsc": BoxSTSC,
-    "stsz": BoxSTSZ,
-    "stss": BoxSTSS,
-    "stts": BoxSTTS,
-    "ctts": BoxCTTS,
-    "ftdt": BoxTFDT,
-    "trex": BoxTREX,
-    "trun": BoxTRUN,
+    "stco": BoxSTCO, "stsc": BoxSTSC, "stsz": BoxSTSZ, "stss": BoxSTSS, "stts": BoxSTTS, "ctts": BoxCTTS,
+    "tfdt": BoxTFDT, "trex": BoxTREX, "trun": BoxTRUN, "mdhd": FullBufBox, "stsd": FullBufBox,
 };
 
 class MP4Container extends SimpleBoxList {
@@ -685,10 +663,8 @@ class MP4Container extends SimpleBoxList {
             return new MP4Container(typ, sz);
         } else if (BOXES[typ]) {
             return new BOXES[typ](typ, sz);
-        } else if (SIMPLE_BOX.has(typ)) {
-            return new UnknownBox(typ, sz);
         }
-        return new FullBufBox(typ, sz);
+        return new UnknownBox(typ, sz);
     }
 }
 
@@ -708,17 +684,24 @@ class Mp4SampleReader {
         this.mdatOffset = mdatOffset || 0;
     }
     isEos() { return this.position >= this.stsz.count(); }
-    isSyncPoint() { return (this.stss == null) || this.stss.include(this.position + 1); }
+    isSyncPoint(position) { return (this.stss == null) || this.stss.include(position + 1); }
     currentChunk() { return this.stsc.sampleToChunk(this.position); }
-    seek(sample) {
-        this.lastChunk = this.stsc.sampleToChunk(sample);
-        this.position = sample;
+    seekPosition(position) {
+        this.lastChunk = this.stsc.sampleToChunk(position);
+        this.position = position;
         this.readOffset = 0;
-        while (sample > 0) {
-            sample--;
-            if (this.stsc.sampleToChunk(sample) != this.lastChunk) break;
-            this.readOffset += this.stsz.sampleSize(sample);
+        while (position > 0) {
+            position--;
+            if (this.stsc.sampleToChunk(position) != this.lastChunk) break;
+            this.readOffset += this.stsz.sampleSize(position);
         }
+    }
+    seek(t) {
+        let p = this.stts.timeToSample(t);
+        while (p < this.stsz.count() && !this.isSyncPoint(p)) {
+            p++;
+        }
+        this.seekPosition(p);
     }
     readSampleInfo() {
         let chunk = this.currentChunk();
@@ -729,7 +712,7 @@ class Mp4SampleReader {
         let sampleInfo = {
             timestamp: this.stts.sampleToTime(this.position),
             timeOffset: this.ctts ? this.ctts.sampleToOffset(this.position) : null,
-            syncPoint: this.isSyncPoint(),
+            syncPoint: this.isSyncPoint(this.position),
             size: this.stsz.sampleSize(this.position),
             offset: this.stco.offset(chunk) + this.readOffset - this.mdatOffset,
             chunk: chunk,
@@ -761,28 +744,27 @@ class Mp4FragmentBuilder {
         return this.samples.length < 2 ? 0 : this.lastTimestamp - this.samples[0].timestamp;
     }
     build(data, offset) {
-        let moof = new SimpleBoxList("moof", 0);
         let mfhd = new BoxMFHD();
         mfhd.sequenceNumber = this.seq;
-        moof.children.push(mfhd);
-        let traf = new SimpleBoxList("traf", 0);
-        moof.children.push(traf);
         let tfhd = new BoxTFHD();
-        tfhd.flags |= BoxTFHD.FLAG_DEFAULT_SIZE | BoxTFHD.FLAG_DEFAULT_FLAGS; // ffmpeg compat
+        tfhd.flags = BoxTFHD.FLAG_DEFAULT_BASE_IS_MOOF | BoxTFHD.FLAG_DEFAULT_DURATION | BoxTFHD.FLAG_DEFAULT_SIZE |
+            BoxTFHD.FLAG_DEFAULT_DURATION | BoxTFHD.FLAG_DEFAULT_SIZE | BoxTFHD.FLAG_DEFAULT_FLAGS;
         tfhd.defaultSize = 0;
         tfhd.defaultFlags = SAMPLE_FLAGS_NO_SYNC;
         tfhd.trackId = this.track;
         tfhd.defaultDuration = (this.duration() / (this.samples.length - 1)) | 0;
-        traf.children.push(tfhd);
-
         let tfdt = new BoxTFDT();
         tfdt.flagStart = this.samples[0].timestamp;
-        traf.children.push(tfdt);
         let trun = new BoxTRUN();
-        traf.children.push(trun);
         trun.flags = BoxTRUN.FLAG_SAMPLE_SIZE | BoxTRUN.FLAG_SAMPLE_FLAGS
             | BoxTRUN.FLAG_SAMPLE_CTS | BoxTRUN.FLAG_DATA_OFFSET;
-
+        let traf = new SimpleBoxList("traf", 0);
+        traf.children.push(tfhd);
+        traf.children.push(tfdt);
+        traf.children.push(trun);
+        let moof = new SimpleBoxList("moof", 0);
+        moof.children.push(mfhd);
+        moof.children.push(traf);
         let mdat = new UnknownBox('mdat', this.totalSize + 8);
         let pos = 0;
         this.samples.forEach(sample => {
@@ -794,7 +776,7 @@ class Mp4FragmentBuilder {
         });
         trun.dataOffset = moof.updateSize() + 8;
 
-        let box = new MP4Container();
+        let box = new SimpleBoxList();
         box.children.push(moof);
         box.children.push(mdat);
         return box;
@@ -805,25 +787,27 @@ class MP4Player {
     constructor(videoEl) {
         this.videoEl = videoEl;
         this.codecs = [];
+        this.fragmented = false;
+        this.segmentDuration = 5;
     }
     async playBufferedReader(br) {
         let perser = new MP4Container();
         let mdatOffset = 8;
         let readers = [];
-        let foundMoof = 0;
         let mdatBox = null;
         let mdatPos = 0;
-        let seq = 0;
+        let mdatLast = null;
+        let segmentSeq = 0;
         let readSegment = async () => {
             await new Promise(resolve => setTimeout(resolve, 500)); // delay for debug.
             let output = new MP4Container();
             let boxes = output.children;
-            if (foundMoof) {
+            if (this.fragmented) {
                 let b1 = await perser.parseBox(br); // moof
                 let b2 = await perser.parseBox(br); // mdat
                 b1 && boxes.push(b1);
                 b2 && boxes.push(b2);
-                seq++;
+                segmentSeq++;
             } else if (mdatBox == null) {
                 let b;
                 while ((b = await perser.peekNextBox(br)) != null) {
@@ -832,7 +816,7 @@ class MP4Player {
                         readers.forEach(r => r.mdatOffset = mdatOffset);
                         break;
                     } else if (b.type == 'moof') {
-                        foundMoof = true;
+                        this.fragmented = true;
                         break;
                     }
                     await perser.parseBox(br);
@@ -846,47 +830,46 @@ class MP4Player {
                     boxes.push(b);
                 }
             } else {
-                let trackId = seq % readers.length + 1;
+                let trackId = segmentSeq % readers.length + 1;
                 let reader = readers[trackId - 1];
-                let builder = new Mp4FragmentBuilder(trackId, ++seq);
-                let minDuration = 5 * reader.timeScale;
-                while (builder.duration() < minDuration && !reader.isEos()) {
+                let segmentEnd = ((segmentSeq / readers.length | 0) + 1)
+                    * this.segmentDuration * reader.timeScale;
+                let builder = new Mp4FragmentBuilder(trackId, ++segmentSeq);
+                while (builder.lastTimestamp < segmentEnd && !reader.isEos()) {
                     builder.addSample(reader.readSampleInfo());
-                    // console.log(sample);
                 }
                 let mdatStart = builder.mdatStart;
                 let mdatEnd = builder.mdatEnd;
                 if (builder.duration() > 0) {
-                    if (mdatPos > mdatStart) {
-                        br.seek(mdatOffset + mdatStart);
-                        mdatPos = mdatStart;
-                        console.warn('seeking... TODO: keep buffer');
-                    } else if (mdatPos < mdatStart) {
-                        console.log(mdatStart, mdatPos);
-                        let dummy = new Uint8Array(mdatStart - mdatPos);
-                        await br.bufferAsync(dummy.length);
-                        br.readBytesTo(dummy);
-                        mdatPos = mdatStart;
+                    if (mdatStart > mdatPos && mdatStart - mdatPos < 1024 * 1024) {
+                        mdatStart = mdatPos;
                     }
                     let data = new Uint8Array(mdatEnd - mdatStart);
-                    await br.bufferAsync(data.length);
-                    mdatPos += data.length;
-                    br.readBytesTo(data);
+                    let mdatLastLen = mdatLast ? mdatLast.byteLength : 0;
+                    let dataOffset = 0;
+                    if (mdatPos - mdatLastLen > mdatStart || mdatStart > mdatPos) {
+                        br.seek(mdatOffset + mdatStart);
+                        console.warn('seeking...');
+                    } else if (mdatPos > mdatStart) {
+                        if (mdatEnd < mdatPos) {
+                            mdatEnd = mdatPos;
+                            data = new Uint8Array(mdatEnd - mdatStart); // TODO
+                        }
+                        dataOffset = mdatPos - mdatStart;
+                        data.set(mdatLast.slice(mdatLastLen - dataOffset), 0);
+                    }
+                    await br.bufferAsync(data.length - dataOffset);
+                    br.readBytesTo(data, dataOffset);
                     output = builder.build(data, mdatStart);
+                    mdatPos = mdatEnd;
+                    mdatLast = data;
                 }
             }
             if (output.children.length == 0) {
                 return null;
             }
             let w = new BufferWriter(output.updateSize() - 8);
-            console.log(output, output.updateSize());
             await output.write(w);
-            //if (seq == 1) {
-            //    let br = new BufferedReader();
-            //    br.appendBuffer(w.buffer);
-            //    console.log(await new MP4Container("", 0xfffffff).parse(br));
-            //    document.body.innerHTML += "<a href=" + URL.createObjectURL(new Blob([w.bytes.slice()])) + ">segment " + seq + " </a><br />";
-            //}
             return w.buffer;
         }
         let buffer = await readSegment();
@@ -916,9 +899,15 @@ class MP4Player {
         });
         sourceBuffer.appendBuffer(buffer);
 
-    }
-    _readSegment() {
-
+        this.videoEl.addEventListener('seeking', ev => {
+            if (mediaSource.readyState == 'open') {
+                let t = Math.max(0, this.videoEl.currentTime - this.segmentDuration / 2);
+                t -= t % this.segmentDuration;
+                readers.forEach(r => r.seek(t * r.timeScale));
+                segmentSeq = t / this.segmentDuration * readers.length;
+                sourceBuffer.abort();
+            }
+        });
     }
     _getCodecs(tracks) {
         return tracks.map(t => {
@@ -936,12 +925,9 @@ class MP4Player {
             return c;
         });
     }
-
     _clearMoov(moov, tracks = null) {
         tracks = tracks || moov.findByTypeAll("trak", []);
         moov.findByTypeAll("stbl", []).forEach(stbl => {
-            // console.log(stbl.children);
-            // TODO
             stbl.children = [
                 stbl.findByType("stsd"),
                 new FullBufBox("stts", 16),
@@ -963,6 +949,7 @@ class MP4Player {
 window.addEventListener('DOMContentLoaded', async (ev) => {
     let videoEl = document.querySelector('video');
     let videoUrl = 'videos/bunny.mp4';
+    //let videoUrl = 'videos/so36255664.mp4';
 
     videoEl.addEventListener('error', ev => console.log('error', ev));
 
