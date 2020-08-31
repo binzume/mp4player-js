@@ -10,7 +10,7 @@ Fetch APIでmp4を読み込み，ブラウザ上でfragmented mp4に変換しな
 
 今の所 実験的な実装なので，とりあえず再生できるだけです．
 
-Test page : https://binzume.github.io/mp4player-js/index.html
+Test page : https://binzume.github.io/mp4player-js/demo/index.html
 
 ## Usage
 
@@ -24,7 +24,7 @@ Test page : https://binzume.github.io/mp4player-js/index.html
             }
         }
     };
-    new MP4Player(videoEl).playBufferedReader(new BufferedReader(options));
+    new MP4Player(videoEl).setBufferedReader(new BufferedReader(options));
 ```
 
 シークするためにはRangeリクエスト必須．
@@ -37,7 +37,7 @@ Test page : https://binzume.github.io/mp4player-js/index.html
     let options = {
         reader: (await fetch(videoUrl)).body.getReader()
     };
-    new MP4Player(videoEl).playBufferedReader(new BufferedReader(options));
+    new MP4Player(videoEl).setBufferedReader(new BufferedReader(options));
 ```
 
 

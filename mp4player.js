@@ -784,13 +784,13 @@ class Mp4FragmentBuilder {
 }
 
 class MP4Player {
-    constructor(videoEl) {
+    constructor(videoEl, options = {}) {
         this.videoEl = videoEl;
+        this.segmentDuration = options.segmentDuration || 5;
         this.codecs = [];
         this.fragmented = false;
-        this.segmentDuration = 5;
     }
-    async playBufferedReader(br) {
+    async setBufferedReader(br) {
         let perser = new MP4Container();
         let mdatOffset = 8;
         let readers = [];
@@ -945,20 +945,3 @@ class MP4Player {
         moov.children.push(mvex);
     }
 }
-
-window.addEventListener('DOMContentLoaded', async (ev) => {
-    let videoEl = document.querySelector('video');
-    let videoUrl = 'videos/bunny.mp4';
-    //let videoUrl = 'videos/so36255664.mp4';
-
-    videoEl.addEventListener('error', ev => console.log('error', ev));
-
-    let options = {
-        opener: {
-            async open(pos) {
-                return (await fetch(videoUrl, pos ? { headers: { 'range': 'bytes=' + pos + '-' } } : {})).body.getReader();
-            }
-        }
-    };
-    new MP4Player(videoEl).playBufferedReader(new BufferedReader(options));
-}, { once: true });

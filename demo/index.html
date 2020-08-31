@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>mp4player.js example</title>
+  <script src="../mp4player.js"></script>
+</head>
+
+<body>
+  <video controls></video>
+  <script>
+    let videoEl = document.querySelector('video');
+    videoEl.addEventListener('error', ev => console.log('error', ev));
+    let videoUrl = 'videos/so36255664.mp4';
+    let options = {
+      opener: {
+        async open(pos) {
+          return (await fetch(videoUrl, pos ? { headers: { 'range': 'bytes=' + pos + '-' } } : {})).body.getReader();
+        }
+      }
+    };
+    new MP4Player(videoEl).setBufferedReader(new BufferedReader(options));
+  </script>
+</body>
+
+</html>
