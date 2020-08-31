@@ -3,29 +3,26 @@ class BufferedReader {
     constructor(options = {}) {
         this.reader = options.reader || null;
         this.opener = options.opener || null;
-        this.littleEndian = false;
+        this.littleEndian = options.littleEndian || false;
+        this.reopenThireshold = 1024;
         this.buffers = [];
-        this.bufferdEnd = 0;
+        this.bufferEnd = 0;
         this.position = 0;
-
-        this.currentBuffer = null;
-        this.currentDataView = null;
-        this.currentRemainings = 0;
-        this.currentBufferOffset = 0;
-
-        this.tmpBuffer = new ArrayBuffer(8);
-        this.tmpDataView = new DataView(this.tmpBuffer);
-        this.tmpBytes = new Uint8Array(this.tmpBuffer);
+        this._currentBuffer = null;
+        this._currentDataView = null;
+        this._currentRemainings = 0;
+        this._currentBufferOffset = 0;
+        this._tmpBuffer = new ArrayBuffer(8);
+        this._tmpDataView = new DataView(this._tmpBuffer);
+        this._tmpBytes = new Uint8Array(this._tmpBuffer);
     }
     available() {
-        return this.bufferdEnd - this.position;
+        return this.bufferEnd - this.position;
     }
     seek(p) {
-        if (p >= this.currentBufferOffset && p < this.bufferdEnd) {
-            let ofs = p - this.position;
-            this.currentRemainings -= ofs;
-            this.position += ofs;
-            _checkCurrentBuffer();
+        if (p >= this._currentBufferOffset && p < this.bufferEnd + this.reopenThireshold) {
+            this._currentRemainings -= p - this.position;
+            this.position = p;
             return;
         }
         if (!this.opener) {
@@ -35,11 +32,11 @@ class BufferedReader {
             this.reader.cancel();
         }
         this.position = p;
-        this.currentBufferOffset = p;
-        this.bufferdEnd = p;
+        this.bufferEnd = p;
+        this._currentBuffer = null;
+        this._currentBufferOffset = p;
+        this._currentRemainings = 0;
         this.buffers = [];
-        this.currentBuffer = null;
-        this.currentRemainings = 0;
         this.reader = null;
     }
     async bufferAsync(sz) {
@@ -61,15 +58,15 @@ class BufferedReader {
     }
     appendBuffer(buffer) {
         this.buffers.push(buffer);
-        this.bufferdEnd += buffer.byteLength;
+        this.bufferEnd += buffer.byteLength;
         this._checkCurrentBuffer();
     }
     _checkCurrentBuffer() {
-        while (this.currentRemainings <= 0) {
-            this.currentBufferOffset += this.currentBuffer ? this.currentBuffer.byteLength : 0;
-            this.currentBuffer = this.buffers.shift();
-            this.currentDataView = new DataView(this.currentBuffer);
-            this.currentRemainings += this.currentBuffer.byteLength;
+        while (this._currentRemainings <= 0 && this.buffers.length > 0) {
+            this._currentBufferOffset += this._currentBuffer ? this._currentBuffer.byteLength : 0;
+            this._currentBuffer = this.buffers.shift();
+            this._currentDataView = new DataView(this._currentBuffer);
+            this._currentRemainings += this._currentBuffer.byteLength;
         }
     }
     _getDataView(n) {
@@ -77,16 +74,16 @@ class BufferedReader {
             throw "no buffered data";
         }
         this._checkCurrentBuffer();
-        if (this.currentRemainings >= n) {
-            return [this.currentDataView, this._proceed(n)];
+        if (this._currentRemainings >= n) {
+            return [this._currentDataView, this._proceed(n)];
         }
-        this.readBytesTo(this.tmpBytes, 0, n);
-        return [this.tmpDataView, 0];
+        this.readBytesTo(this._tmpBytes, 0, n);
+        return [this._tmpDataView, 0];
     }
     _proceed(n) {
         this.position += n;
-        this.currentRemainings -= n;
-        return this.position - this.currentBufferOffset - n;
+        this._currentRemainings -= n;
+        return this.position - this._currentBufferOffset - n;
     }
     readBytesTo(bytes, offset, size) {
         offset = offset || 0;
@@ -94,8 +91,8 @@ class BufferedReader {
         let p = 0;
         while (p < size) {
             this._checkCurrentBuffer();
-            let l = Math.min(size - p, this.currentRemainings);
-            bytes.set(new Uint8Array(this.currentBuffer, this._proceed(l), l), offset + p);
+            let l = Math.min(size - p, this._currentRemainings);
+            bytes.set(new Uint8Array(this._currentBuffer, this._proceed(l), l), offset + p);
             p += l;
         }
         return bytes;
@@ -105,8 +102,8 @@ class BufferedReader {
         let p = 0;
         while (p < len) {
             this._checkCurrentBuffer();
-            let l = Math.min(len - p, this.currentRemainings);
-            result.push(new Uint8Array(this.currentBuffer, this._proceed(l), l));
+            let l = Math.min(len - p, this._currentRemainings);
+            result.push(new Uint8Array(this._currentBuffer, this._proceed(l), l));
             p += l;
         }
         return result;
@@ -240,7 +237,7 @@ class SimpleBoxList extends Box {
         }
     }
     newBox(typ, sz) {
-        return new UnknownBox(typ, sz);
+        return new GenericBox(typ, sz);
     }
     async write(w) {
         for (let b of this.children) {
@@ -337,7 +334,7 @@ class FullBufBox extends FullBox {
 }
 
 class BoxSTSC extends FullBufBox {
-    constructor(type = "stsc", size = 0) {
+    constructor(type = "stsc", size = 16) {
         super(type, size);
     }
     count() { return this.r32(0); }
@@ -362,7 +359,7 @@ class BoxSTSC extends FullBufBox {
 }
 
 class BoxSTTS extends FullBufBox {
-    constructor(type = "stts", size = 0) {
+    constructor(type = "stts", size = 16) {
         super(type, size);
     }
     count() { return this.r32(0); }
@@ -417,7 +414,7 @@ class BoxCTTS extends FullBufBox {
 }
 
 class BoxSTCO extends FullBufBox {
-    constructor(type = "stco", size = 0) {
+    constructor(type = "stco", size = 16) {
         super(type, size);
     }
     count() { return this.r32(0); }
@@ -440,7 +437,7 @@ class BoxSTSS extends FullBufBox {
 }
 
 class BoxSTSZ extends FullBufBox {
-    constructor(type = "stsz", size = 0) {
+    constructor(type = "stsz", size = 20) {
         super(type, size);
     }
     constantSize() { return this.r32(0); }
@@ -634,7 +631,7 @@ class BoxTRUN extends FullBox {
     }
 }
 
-class UnknownBox extends Box {
+class GenericBox extends Box {
     constructor(type, size) {
         super(type, size);
         this.data = [];
@@ -679,7 +676,7 @@ class MP4Container extends SimpleBoxList {
         } else if (BOXES[typ]) {
             return new BOXES[typ](typ, sz);
         }
-        return new UnknownBox(typ, sz);
+        return new GenericBox(typ, sz);
     }
 }
 
@@ -700,7 +697,14 @@ class Mp4SampleReader {
     }
     isEos() { return this.position >= this.stsz.count(); }
     isSyncPoint(position) { return (this.stss == null) || this.stss.include(position + 1); }
-    currentChunk() { return this.stsc.sampleToChunk(this.position); }
+    dataOffset() {
+        let chunk = this.stsc.sampleToChunk(this.position);
+        if (this.lastChunk != chunk) {
+            this.lastChunk = chunk;
+            this.readOffset = 0;
+        }
+        return this.stco.offset(chunk) + this.readOffset - this.mdatOffset;
+    }
     seekPosition(position) {
         this.lastChunk = this.stsc.sampleToChunk(position);
         this.position = position;
@@ -719,18 +723,12 @@ class Mp4SampleReader {
         this.seekPosition(p);
     }
     readSampleInfo() {
-        let chunk = this.currentChunk();
-        if (this.lastChunk != chunk) {
-            this.lastChunk = chunk;
-            this.readOffset = 0;
-        }
         let sampleInfo = {
             timestamp: this.stts.sampleToTime(this.position),
             timeOffset: this.ctts ? this.ctts.sampleToOffset(this.position) : null,
             syncPoint: this.isSyncPoint(this.position),
             size: this.stsz.sampleSize(this.position),
-            offset: this.stco.offset(chunk) + this.readOffset - this.mdatOffset,
-            chunk: chunk,
+            offset: this.dataOffset(),
         };
         this.readOffset += sampleInfo.size;
         this.position++;
@@ -738,7 +736,7 @@ class Mp4SampleReader {
     }
 }
 
-class Mp4FragmentBuilder {
+class MP4FragmentBuilder {
     constructor(track, seq) {
         this.track = track;
         this.seq = seq;
@@ -780,7 +778,7 @@ class Mp4FragmentBuilder {
         let moof = new SimpleBoxList("moof", 0);
         moof.children.push(mfhd);
         moof.children.push(traf);
-        let mdat = new UnknownBox('mdat', this.totalSize + 8);
+        let mdat = new GenericBox('mdat', this.totalSize + 8);
         this.samples.forEach(sample => {
             trun.add(sample.size);
             trun.add(sample.syncPoint ? SAMPLE_FLAGS_SYNC : SAMPLE_FLAGS_NO_SYNC);
@@ -795,133 +793,92 @@ class Mp4FragmentBuilder {
     }
 }
 
-class MP4Player {
-    constructor(videoEl, options = {}) {
-        this.videoEl = videoEl;
-        this.segmentDuration = options.segmentDuration || 5;
+class MP4SegmentReader {
+    constructor(segmentDuration) {
+        this.segmentDuration = segmentDuration;
         this.codecs = [];
         this.fragmented = false;
+
+        this._perser = new MP4Container();
+        this._mdatOffset = 0;
+        this._readers = [];
+        this._mdatPos = 0;
+        this._mdatLast = null;
+        this._segmentSeq = 0;
     }
-    async setBufferedReader(br) {
-        let perser = new MP4Container();
-        let mdatOffset = 0;
-        let readers = [];
-        let mdatPos = 0;
-        let mdatLast = null;
-        let segmentSeq = 0;
-        let readSegment = async () => {
-            await new Promise(resolve => setTimeout(resolve, 500)); // delay for debug.
-            let output = new MP4Container();
-            if (this.fragmented) {
-                let b1 = await perser.parseBox(br); // moof
-                let b2 = await perser.parseBox(br); // mdat
-                b1 && output.children.push(b1);
-                b2 && output.children.push(b2);
-                segmentSeq++;
-            } else if (mdatOffset == 0) {
-                let b;
-                while ((b = await perser.peekNextBox(br)) !== null) {
-                    if (b.type == 'mdat') {
-                        mdatOffset = br.position;
-                        readers.forEach(r => r.mdatOffset = mdatOffset);
-                        break;
-                    } else if (b.type == 'moof') {
-                        this.fragmented = true;
-                        break;
-                    }
-                    await perser.parseBox(br);
-                    if (b.type == 'moov') {
-                        let tracks = b.findByTypeAll("trak", []);
-                        readers = tracks.map(t => new Mp4SampleReader(t));
-                        this.codecs = this._getCodecs(tracks);
-                        this._clearMoov(b, tracks);
-                    }
-                    output.children.push(b);
+    async readSegment(br) {
+        let output = new MP4Container();
+        if (this.fragmented) {
+            let b1 = await perser.parseBox(br); // moof
+            let b2 = await perser.parseBox(br); // mdat
+            b1 && output.children.push(b1);
+            b2 && output.children.push(b2);
+            segmentSeq++;
+        } else if (this._mdatOffset == 0) {
+            let b;
+            while ((b = await this._perser.peekNextBox(br)) !== null) {
+                if (b.type == 'mdat') {
+                    this._mdatOffset = br.position;
+                    this._readers.forEach(r => r.mdatOffset = this._mdatOffset);
+                    break;
+                } else if (b.type == 'moof') {
+                    this.fragmented = true;
+                    break;
                 }
-            } else {
-                let trackId = segmentSeq % readers.length + 1;
-                let reader = readers[trackId - 1];
-                let segmentEnd = ((segmentSeq / readers.length | 0) + 1)
-                    * this.segmentDuration * reader.timeScale;
-                let builder = new Mp4FragmentBuilder(trackId, ++segmentSeq);
-                while (builder.lastTimestamp < segmentEnd && !reader.isEos()) {
-                    builder.addSample(reader.readSampleInfo());
+                await this._perser.parseBox(br);
+                if (b.type == 'moov') {
+                    let tracks = b.findByTypeAll("trak", []);
+                    this._readers = tracks.map(t => new Mp4SampleReader(t));
+                    this.codecs = this._getCodecs(tracks);
+                    this.mimeType = 'video/mp4; codecs="' + this.codecs.join(",") + '"';
+                    this._clearMoov(b, tracks);
                 }
-                let mdatStart = builder.mdatStart;
+                output.children.push(b);
+            }
+        } else {
+            let trackId = this._segmentSeq % this._readers.length + 1;
+            let reader = this._readers[trackId - 1];
+            let segmentEnd = ((this._segmentSeq / this._readers.length | 0) + 1)
+                * this.segmentDuration * reader.timeScale;
+            let mdatStart = Math.min(...this._readers.filter(r => !r.isEos()).map(r => r.dataOffset()));
+            let builder = new MP4FragmentBuilder(trackId, ++this._segmentSeq);
+            while (builder.lastTimestamp < segmentEnd && !reader.isEos()) {
+                builder.addSample(reader.readSampleInfo());
+            }
+            if (builder.duration() > 0) {
+                mdatStart = Math.min(mdatStart, builder.mdatStart);
                 let mdatEnd = builder.mdatEnd;
-                if (builder.duration() > 0) {
-                    if (mdatStart > mdatPos && mdatStart - mdatPos < 1024 * 1024) {
-                        mdatStart = mdatPos;
+                let data = new Uint8Array(mdatEnd - mdatStart);
+                let mdatLastLen = this._mdatLast ? this._mdatLast.byteLength : 0;
+                let dataOffset = 0;
+                if (this._mdatPos - mdatLastLen > mdatStart || mdatStart > this._mdatPos) {
+                    br.seek(this._mdatOffset + mdatStart);
+                } else if (this._mdatPos > mdatStart) {
+                    if (mdatEnd < this._mdatPos) {
+                        mdatEnd = this._mdatPos;
+                        data = new Uint8Array(mdatEnd - mdatStart); // TODO
                     }
-                    let data = new Uint8Array(mdatEnd - mdatStart);
-                    let mdatLastLen = mdatLast ? mdatLast.byteLength : 0;
-                    let dataOffset = 0;
-                    if (mdatPos - mdatLastLen > mdatStart || mdatStart > mdatPos) {
-                        br.seek(mdatOffset + mdatStart);
-                        console.warn('seeking...');
-                    } else if (mdatPos > mdatStart) {
-                        if (mdatEnd < mdatPos) {
-                            mdatEnd = mdatPos;
-                            data = new Uint8Array(mdatEnd - mdatStart); // TODO
-                        }
-                        dataOffset = mdatPos - mdatStart;
-                        data.set(mdatLast.slice(mdatLastLen - dataOffset), 0);
-                    }
-                    await br.bufferAsync(data.length - dataOffset);
-                    br.readBytesTo(data, dataOffset);
-                    builder.build(output, data, mdatStart);
-                    mdatPos = mdatEnd;
-                    mdatLast = data;
+                    dataOffset = this._mdatPos - mdatStart;
+                    data.set(this._mdatLast.slice(mdatLastLen - dataOffset), 0);
                 }
+                await br.bufferAsync(data.length - dataOffset);
+                br.readBytesTo(data, dataOffset);
+                builder.build(output, data, mdatStart);
+                this._mdatPos = mdatEnd;
+                this._mdatLast = data;
             }
-            if (output.children.length == 0) {
-                return null;
-            }
-            let w = new BufferWriter(output.updateSize() - 8);
-            await output.write(w);
-            return w.buffer;
-        };
-        let buffer = await readSegment();
-        if (buffer == null) {
-            throw 'cannnot read init segment';
         }
-
-        let mimeCodec = 'video/mp4; codecs="' + this.codecs.join(",") + '"';
-        console.log(mimeCodec);
-        if (!MediaSource.isTypeSupported(mimeCodec)) {
-            throw 'Unsupported MIME type or codec: ' + mimeCodec;
+        if (output.children.length == 0) {
+            return null;
         }
-
-        let mediaSource = new MediaSource();
-        this.videoEl.src = URL.createObjectURL(mediaSource);
-
-        await new Promise(resolve => mediaSource.addEventListener('sourceopen', resolve, { once: true }));
-        let sourceBuffer = mediaSource.addSourceBuffer(mimeCodec);
-
-        sourceBuffer.addEventListener('updateend', async () => {
-            let buffer = await readSegment();
-            if (buffer == null) {
-                mediaSource.endOfStream();
-            } else {
-                sourceBuffer.appendBuffer(buffer);
-            }
-        });
-        sourceBuffer.appendBuffer(buffer);
-
-        this.videoEl.addEventListener('seeking', async (ev) => {
-            let t = Math.max(0, this.videoEl.currentTime - this.segmentDuration / 2);
-            t -= t % this.segmentDuration;
-            readers.forEach(r => r.seek(t * r.timeScale));
-            segmentSeq = t / this.segmentDuration * readers.length;
-            if (mediaSource.readyState == 'open') {
-                sourceBuffer.abort();
-            } else if (mediaSource.readyState == 'ended') {
-                let buffer = await readSegment();
-                if (buffer != null) {
-                    sourceBuffer.appendBuffer(buffer);
-                }
-            }
-        });
+        let w = new BufferWriter(output.updateSize() - 8);
+        await output.write(w);
+        return w.buffer;
+    }
+    seek(t) {
+        t -= t % this.segmentDuration;
+        this._readers.forEach(r => r.seek(t * r.timeScale));
+        this._segmentSeq = t / this.segmentDuration * this._readers.length;
     }
     _getCodecs(tracks) {
         return tracks.map(t => {
@@ -944,10 +901,10 @@ class MP4Player {
         moov.findByTypeAll("stbl", []).forEach(stbl => {
             stbl.children = [
                 stbl.findByType("stsd"),
-                new FullBufBox("stts", 16),
-                new FullBufBox("stsc", 16),
-                new FullBufBox("stsz", 20),
-                new FullBufBox("stco", 16),
+                new BoxSTTS(),
+                new BoxSTSC(),
+                new BoxSTSZ(),
+                new BoxSTCO(),
             ];
         });
         let mvex = new SimpleBoxList("mvex", 0);
@@ -958,4 +915,56 @@ class MP4Player {
         });
         moov.children.push(mvex);
     }
+}
+
+class MP4Player extends MP4SegmentReader {
+    constructor(videoEl, options = {}) {
+        super(options.segmentDuration || 5);
+        this.videoEl = videoEl;
+    }
+    async setBufferedReader(br) {
+        let initSegment = await this.readSegment(br);
+        if (initSegment == null) {
+            throw 'cannnot read init segment';
+        }
+
+        console.log(this.mimeType);
+        if (!MediaSource.isTypeSupported(this.mimeType)) {
+            throw 'Unsupported MIME type or codec: ' + this.mimeType;
+        }
+
+        let mediaSource = new MediaSource();
+        this.videoEl.src = URL.createObjectURL(mediaSource);
+        await new Promise(resolve => mediaSource.addEventListener('sourceopen', resolve, { once: true }));
+
+        let sourceBuffer = mediaSource.addSourceBuffer(this.mimeType);
+        sourceBuffer.addEventListener('updateend', async () => {
+            await new Promise(resolve => setTimeout(resolve, 500)); // delay for debug.
+            let buffer = await this.readSegment(br);
+            if (buffer == null) {
+                mediaSource.endOfStream();
+            } else {
+                sourceBuffer.appendBuffer(buffer);
+            }
+        });
+
+        this.videoEl.addEventListener('seeking', async (ev) => {
+            this.seek(Math.max(0, this.videoEl.currentTime - this.segmentDuration / 2));
+            if (mediaSource.readyState == 'open') {
+                sourceBuffer.abort();
+            } else if (mediaSource.readyState == 'ended') {
+                let buffer = await this.readSegment(br);
+                if (buffer != null) {
+                    sourceBuffer.appendBuffer(buffer);
+                }
+            }
+        });
+
+        sourceBuffer.appendBuffer(initSegment);
+    }
+}
+
+// TODO
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { BufferedReader, MP4SegmentReader, MP4Player };
 }
