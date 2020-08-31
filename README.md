@@ -43,7 +43,6 @@ Test page : https://binzume.github.io/mp4player-js/demo/index.html
 
 ## TODO
 
-- まともな実装にする
 - パフォーマンスの改善
 - バッファ管理
 

@@ -1,0 +1,25 @@
+{
+  "name": "mp4player.js",
+  "version": "0.0.1",
+  "description": "MP4 player using Media Source Extensions",
+  "main": "mp4player.js",
+  "scripts": {
+    "test": "mocha"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/binzume/mp4player-js.git"
+  },
+  "keywords": [
+    "MP4"
+  ],
+  "author": "binzume",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/binzume/mp4player-js/issues"
+  },
+  "homepage": "https://github.com/binzume/mp4player-js#readme",
+  "dependencies": {
+    "mocha": "^8.1.3"
+  }
+}
