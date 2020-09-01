@@ -1,6 +1,6 @@
 # mp4player.js
 
-Fetch APIでmp4を読み込み，ブラウザ上でfragmented mp4に変換しながら Media Source Extensions APIで再生するやつ．
+Fetch APIでmp4を読み込み，fragmented mp4に変換しながら Media Source Extensions APIで再生するやつ．
 
 以下の問題を回避するものです．
 
@@ -8,11 +8,11 @@ Fetch APIでmp4を読み込み，ブラウザ上でfragmented mp4に変換しな
 - FetchやXHRで読み込んでblobを再生 → 読み込み完了まで再生できない
 - MPEG-DASHなどFragmented mp4にする → 事前の変換が必要
 
-今の所 実験的な実装なので，とりあえず再生できるだけです．
-
 Test page : https://binzume.github.io/mp4player-js/demo/index.html
 
 ## Usage
+
+[demo/index.html](demo/index.html)
 
 ```js
     let videoEl = document.querySelector('video');
@@ -27,7 +27,7 @@ Test page : https://binzume.github.io/mp4player-js/demo/index.html
     new MP4Player(videoEl).setBufferedReader(new BufferedReader(options));
 ```
 
-シークするためにはRangeリクエスト必須．
+シークするためにはRangeリクエスト必須です．
 
 シークが不要な場合は，以下のようにread()メソッドを持つReaderを渡してください．
 
@@ -40,9 +40,19 @@ Test page : https://binzume.github.io/mp4player-js/demo/index.html
     new MP4Player(videoEl).setBufferedReader(new BufferedReader(options));
 ```
 
+### npm
+
+https://www.npmjs.com/package/mp4player.js
+
+```
+npm i mp4player.js
+node
+> const {MP4Player, BufferedReader} = require('mp4player.js');
+```
 
 ## TODO
 
+- faststartじゃないmp4対応
 - パフォーマンスの改善
 - バッファ管理
 

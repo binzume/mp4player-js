@@ -4,7 +4,7 @@ class BufferedReader {
         this.reader = options.reader || null;
         this.opener = options.opener || null;
         this.littleEndian = options.littleEndian || false;
-        this.reopenThireshold = 1024;
+        this.reopenThireshold = options.reopenThireshold || 1024;
         this.buffers = [];
         this.bufferEnd = 0;
         this.position = 0;
@@ -21,8 +21,7 @@ class BufferedReader {
     }
     seek(p) {
         if (p >= this._currentBufferOffset && p < this.bufferEnd + this.reopenThireshold) {
-            this._currentRemainings -= p - this.position;
-            this.position = p;
+            this._move(p - this.position);
             return;
         }
         if (!this.opener) {
@@ -59,9 +58,14 @@ class BufferedReader {
     appendBuffer(buffer) {
         this.buffers.push(buffer);
         this.bufferEnd += buffer.byteLength;
-        this._checkCurrentBuffer();
+        this._updateCurrentBuffer();
     }
-    _checkCurrentBuffer() {
+    _move(n) {
+        this.position += n;
+        this._currentRemainings -= n;
+        return this.position - this._currentBufferOffset - n;
+    }
+    _updateCurrentBuffer() {
         while (this._currentRemainings <= 0 && this.buffers.length > 0) {
             this._currentBufferOffset += this._currentBuffer ? this._currentBuffer.byteLength : 0;
             this._currentBuffer = this.buffers.shift();
@@ -73,26 +77,21 @@ class BufferedReader {
         if (this.available() < n) {
             throw "no buffered data";
         }
-        this._checkCurrentBuffer();
+        this._updateCurrentBuffer();
         if (this._currentRemainings >= n) {
-            return [this._currentDataView, this._proceed(n)];
+            return [this._currentDataView, this._move(n)];
         }
         this.readBytesTo(this._tmpBytes, 0, n);
         return [this._tmpDataView, 0];
-    }
-    _proceed(n) {
-        this.position += n;
-        this._currentRemainings -= n;
-        return this.position - this._currentBufferOffset - n;
     }
     readBytesTo(bytes, offset, size) {
         offset = offset || 0;
         size = size || bytes.length - offset;
         let p = 0;
         while (p < size) {
-            this._checkCurrentBuffer();
+            this._updateCurrentBuffer();
             let l = Math.min(size - p, this._currentRemainings);
-            bytes.set(new Uint8Array(this._currentBuffer, this._proceed(l), l), offset + p);
+            bytes.set(new Uint8Array(this._currentBuffer, this._move(l), l), offset + p);
             p += l;
         }
         return bytes;
@@ -101,9 +100,9 @@ class BufferedReader {
         let result = [];
         let p = 0;
         while (p < len) {
-            this._checkCurrentBuffer();
+            this._updateCurrentBuffer();
             let l = Math.min(len - p, this._currentRemainings);
-            result.push(new Uint8Array(this._currentBuffer, this._proceed(l), l));
+            result.push(new Uint8Array(this._currentBuffer, this._move(l), l));
             p += l;
         }
         return result;
@@ -400,16 +399,14 @@ class BoxCTTS extends FullBufBox {
     count() { return this.r32(0); }
     count1(n) { return this.r32(4 + n * 8); }
     offset(n) { return this.r32(4 + n * 8 + 4); }
-    sampleToOffset(n) { // n: [0..(numSample-1)]
+    sampleToOffsetEntry(n) { // n: [0..(numSample-1)]
         let c = this.count();
-        let ofs = 0;
         let s = 0;
         for (let i = 0; i < c; i++) {
-            ofs = this.offset(i);
             s += this.count1(i);
-            if (n < s) break;
+            if (n < s) return [i, s - n];
         }
-        return ofs;
+        return null;
     }
 }
 
@@ -427,13 +424,6 @@ class BoxSTSS extends FullBufBox {
     }
     count() { return this.r32(0); }
     sync(pos) { return this.r32(4 + pos * 4); }
-    include(sample) {
-        let c = this.count();
-        for (let i = 0; i < c; i++) {
-            if (this.sync(i) == sample) return true; // TODO binary search.
-        }
-        return false;
-    }
 }
 
 class BoxSTSZ extends FullBufBox {
@@ -694,9 +684,16 @@ class Mp4SampleReader {
         this.readOffset = 0;
         this.lastChunk = -1;
         this.mdatOffset = mdatOffset || 0;
+        this.timeOffsetEntry = null; // ctts [entry, count]
+        if (this.stss) {
+            this.syncPoints = new Set();
+            for (let i = 0; i < this.stss.count(); i++) {
+                this.syncPoints.add(this.stss.sync(i));
+            }
+        }
     }
     isEos() { return this.position >= this.stsz.count(); }
-    isSyncPoint(position) { return (this.stss == null) || this.stss.include(position + 1); }
+    isSyncPoint(position) { return this.syncPoints == null || this.syncPoints.has(position + 1); }
     dataOffset() {
         let chunk = this.stsc.sampleToChunk(this.position);
         if (this.lastChunk != chunk) {
@@ -706,6 +703,7 @@ class Mp4SampleReader {
         return this.stco.offset(chunk) + this.readOffset - this.mdatOffset;
     }
     seekPosition(position) {
+        this.timeOffsetEntry = null;
         this.lastChunk = this.stsc.sampleToChunk(position);
         this.position = position;
         this.readOffset = 0;
@@ -723,9 +721,20 @@ class Mp4SampleReader {
         this.seekPosition(p);
     }
     readSampleInfo() {
+        let timeOffset = null;
+        if (this.ctts != null) {
+            if (this.timeOffsetEntry == null) {
+                this.timeOffsetEntry = this.ctts.sampleToOffsetEntry(this.position);
+            } else if (this.timeOffsetEntry[1] == 0) {
+                this.timeOffsetEntry[0]++;
+                this.timeOffsetEntry[1] = this.ctts.count1(this.timeOffsetEntry[0]);
+            }
+            this.timeOffsetEntry[1]--;
+            timeOffset = this.ctts.offset(this.timeOffsetEntry[0]);
+        }
         let sampleInfo = {
             timestamp: this.stts.sampleToTime(this.position),
-            timeOffset: this.ctts ? this.ctts.sampleToOffset(this.position) : null,
+            timeOffset: timeOffset,
             syncPoint: this.isSyncPoint(this.position),
             size: this.stsz.sampleSize(this.position),
             offset: this.dataOffset(),
@@ -848,7 +857,7 @@ class MP4SegmentReader {
             if (builder.duration() > 0) {
                 mdatStart = Math.min(mdatStart, builder.mdatStart);
                 let mdatEnd = builder.mdatEnd;
-                let data = new Uint8Array(mdatEnd - mdatStart);
+                let data;
                 let mdatLastLen = this._mdatLast ? this._mdatLast.byteLength : 0;
                 let dataOffset = 0;
                 if (this._mdatPos - mdatLastLen > mdatStart || mdatStart > this._mdatPos) {
@@ -856,12 +865,13 @@ class MP4SegmentReader {
                 } else if (this._mdatPos > mdatStart) {
                     if (mdatEnd < this._mdatPos) {
                         mdatEnd = this._mdatPos;
-                        data = new Uint8Array(mdatEnd - mdatStart); // TODO
                     }
+                    data = new Uint8Array(mdatEnd - mdatStart); // TODO
                     dataOffset = this._mdatPos - mdatStart;
                     data.set(this._mdatLast.slice(mdatLastLen - dataOffset), 0);
                 }
-                await br.bufferAsync(data.length - dataOffset);
+                await br.bufferAsync(mdatEnd - mdatStart - dataOffset);
+                data = data || new Uint8Array(mdatEnd - mdatStart);
                 br.readBytesTo(data, dataOffset);
                 builder.build(output, data, mdatStart);
                 this._mdatPos = mdatEnd;

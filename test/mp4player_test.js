@@ -53,11 +53,12 @@ describe('BufferedReader', () => {
 
 
 describe('MP4SegmentReader', () => {
-    it('can read segments', async () => {
+    it('can read segments', async function () {
         let path = 'demo/videos/bunny.mp4';
         let r = await getReader(path);
         let br = new BufferedReader({ littleEndian: false, reader: r });
-        let player = new MP4SegmentReader();
+        let player = new MP4SegmentReader(5);
+        this.timeout(10000);
 
         let initSegment = await player.readSegment(br);
         assert.ok(initSegment.byteLength > 0);
