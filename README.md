@@ -52,7 +52,6 @@ node
 
 ## TODO
 
-- faststartじゃないmp4対応
 - パフォーマンスの改善
 - バッファ管理
 

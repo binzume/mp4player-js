@@ -671,7 +671,7 @@ class MP4Container extends SimpleBoxList {
 }
 
 class Mp4SampleReader {
-    constructor(track, mdatOffset) {
+    constructor(track) {
         this.stsc = track.findByType('stsc');
         this.stss = track.findByType('stss');
         this.stsz = track.findByType('stsz');
@@ -683,7 +683,6 @@ class Mp4SampleReader {
         this.position = 0;
         this.readOffset = 0;
         this.lastChunk = -1;
-        this.mdatOffset = mdatOffset || 0;
         this.timeOffsetEntry = null; // ctts [entry, count]
         if (this.stss) {
             this.syncPoints = new Set();
@@ -700,7 +699,7 @@ class Mp4SampleReader {
             this.lastChunk = chunk;
             this.readOffset = 0;
         }
-        return this.stco.offset(chunk) + this.readOffset - this.mdatOffset;
+        return this.stco.offset(chunk) + this.readOffset;
     }
     seekPosition(position) {
         this.timeOffsetEntry = null;
@@ -806,32 +805,33 @@ class MP4SegmentReader {
     constructor(segmentDuration) {
         this.segmentDuration = segmentDuration;
         this.codecs = [];
-        this.fragmented = false;
+        this.fragmentedInput = false;
 
         this._perser = new MP4Container();
-        this._mdatOffset = 0;
         this._readers = [];
-        this._mdatPos = 0;
         this._mdatLast = null;
         this._segmentSeq = 0;
     }
     async readSegment(br) {
         let output = new MP4Container();
-        if (this.fragmented) {
+        if (this.fragmentedInput) {
             let b1 = await perser.parseBox(br); // moof
             let b2 = await perser.parseBox(br); // mdat
             b1 && output.children.push(b1);
             b2 && output.children.push(b2);
             segmentSeq++;
-        } else if (this._mdatOffset == 0) {
+        } else if (this._readers.length == 0) {
             let b;
             while ((b = await this._perser.peekNextBox(br)) !== null) {
                 if (b.type == 'mdat') {
-                    this._mdatOffset = br.position;
-                    this._readers.forEach(r => r.mdatOffset = this._mdatOffset);
-                    break;
+                    if (this._readers.length > 0) {
+                        break;
+                    }
+                    this._perser.nextBox = null;
+                    br.seek(br.position + b.size - 8);
+                    continue;
                 } else if (b.type == 'moof') {
-                    this.fragmented = true;
+                    this.fragmentedInput = true;
                     break;
                 }
                 await this._perser.parseBox(br);
@@ -860,21 +860,21 @@ class MP4SegmentReader {
                 let data;
                 let mdatLastLen = this._mdatLast ? this._mdatLast.byteLength : 0;
                 let dataOffset = 0;
-                if (this._mdatPos - mdatLastLen > mdatStart || mdatStart > this._mdatPos) {
-                    br.seek(this._mdatOffset + mdatStart);
-                } else if (this._mdatPos > mdatStart) {
-                    if (mdatEnd < this._mdatPos) {
-                        mdatEnd = this._mdatPos;
+                let mdatPos = br.position;
+                if (mdatPos - mdatLastLen > mdatStart || mdatStart > mdatPos) {
+                    br.seek(mdatStart);
+                } else if (mdatPos > mdatStart) {
+                    if (mdatEnd < mdatPos) {
+                        mdatEnd = mdatPos;
                     }
                     data = new Uint8Array(mdatEnd - mdatStart); // TODO
-                    dataOffset = this._mdatPos - mdatStart;
+                    dataOffset = mdatPos - mdatStart;
                     data.set(this._mdatLast.slice(mdatLastLen - dataOffset), 0);
                 }
                 await br.bufferAsync(mdatEnd - mdatStart - dataOffset);
                 data = data || new Uint8Array(mdatEnd - mdatStart);
                 br.readBytesTo(data, dataOffset);
                 builder.build(output, data, mdatStart);
-                this._mdatPos = mdatEnd;
                 this._mdatLast = data;
             }
         }
