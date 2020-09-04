@@ -51,14 +51,13 @@ class BufferedReader {
             if (done) {
                 return false;
             }
-            this.appendBuffer(value.buffer);
+            this.appendBuffer(value);
         }
         return true;
     }
     appendBuffer(buffer) {
         this.buffers.push(buffer);
         this.bufferEnd += buffer.byteLength;
-        this._updateCurrentBuffer();
     }
     _move(n) {
         this.position += n;
@@ -69,7 +68,7 @@ class BufferedReader {
         while (this._currentRemainings <= 0 && this.buffers.length > 0) {
             this._currentBufferOffset += this._currentBuffer ? this._currentBuffer.byteLength : 0;
             this._currentBuffer = this.buffers.shift();
-            this._currentDataView = new DataView(this._currentBuffer);
+            this._currentDataView = new DataView(this._currentBuffer.buffer);
             this._currentRemainings += this._currentBuffer.byteLength;
         }
     }
@@ -85,13 +84,12 @@ class BufferedReader {
         return [this._tmpDataView, 0];
     }
     readBytesTo(bytes, offset, size) {
-        offset = offset || 0;
-        size = size || bytes.length - offset;
-        let p = 0;
-        while (p < size) {
+        let p = offset || 0;
+        let end = size != null ? size - p : bytes.length;
+        while (p < end) {
             this._updateCurrentBuffer();
-            let l = Math.min(size - p, this._currentRemainings);
-            bytes.set(new Uint8Array(this._currentBuffer, this._move(l), l), offset + p);
+            let l = Math.min(end - p, this._currentRemainings);
+            bytes.set(this._currentBuffer.slice(this._move(l), this.position - this._currentBufferOffset), p);
             p += l;
         }
         return bytes;
@@ -102,7 +100,7 @@ class BufferedReader {
         while (p < len) {
             this._updateCurrentBuffer();
             let l = Math.min(len - p, this._currentRemainings);
-            result.push(new Uint8Array(this._currentBuffer, this._move(l), l));
+            result.push(this._currentBuffer.slice(this._move(l), this.position - this._currentBufferOffset));
             p += l;
         }
         return result;
@@ -364,18 +362,25 @@ class BoxSTTS extends FullBufBox {
     count() { return this.r32(0); }
     count1(n) { return this.r32(4 + n * 8); }
     delta(n) { return this.r32(4 + n * 8 + 4); }
-    sampleToTime(n) { // n: [0..(numSample-1)]
+    getCursor(n) { // n: [0..(numSample-1)]
         let count = this.count();
         let t = 0;
         for (let i = 0; i < count; i++) {
             let c = this.count1(i), d = this.delta(i);
             if (n < c) {
-                return t + n * d;
+                return [t + n * d, d, c - n, i];
             }
             n -= c;
             t += c * d;
         }
-        return t;
+        return [t, 0, 0, 0];
+    }
+    next(c) {
+        if (--c[2] == 0 && c[3] + 1 < this.count()) {
+            c[1] = this.delta(++c[3]);
+            c[2] = this.count1(c[3]);
+        }
+        c[0] += c[1];
     }
     timeToSample(t) {
         let count = this.count();
@@ -399,7 +404,7 @@ class BoxCTTS extends FullBufBox {
     count() { return this.r32(0); }
     count1(n) { return this.r32(4 + n * 8); }
     offset(n) { return this.r32(4 + n * 8 + 4); }
-    sampleToOffsetEntry(n) { // n: [0..(numSample-1)]
+    getCursor(n) { // n: [0..(numSample-1)]
         let c = this.count();
         let s = 0;
         for (let i = 0; i < c; i++) {
@@ -407,6 +412,11 @@ class BoxCTTS extends FullBufBox {
             if (n < s) return [i, s - n];
         }
         return null;
+    }
+    next(c) {
+        if (--c[1] == 0 && c[0] + 1 < this.count()) {
+            c[1] = this.count1(++c[0]);
+        }
     }
 }
 
@@ -535,7 +545,7 @@ class BoxTFHD extends FullBox {
 class BoxTFDT extends FullBox {
     constructor(type = "tfdt", size = 0) {
         super(type, size);
-        this.version = 1;
+        this.version = 0; // size < 4GB
         this.flagStart = 0;
     }
     async parse(r) {
@@ -547,8 +557,7 @@ class BoxTFDT extends FullBox {
         this.version == 1 ? w.write64(this.flagStart) : w.write32(this.flagStart);
     }
     updateSize() {
-        this.version = 1; // always 64bit
-        this.size = this.HEADER_SIZE + 8;
+        this.size = this.HEADER_SIZE + (this.version == 1 ? 8 : 4);
         return this.size;
     }
 }
@@ -683,7 +692,8 @@ class Mp4SampleReader {
         this.position = 0;
         this.readOffset = 0;
         this.lastChunk = -1;
-        this.timeOffsetEntry = null; // ctts [entry, count]
+        this.timeOffsetCursor = null;
+        this.timestampCursor = this.stts.getCursor(this.position);
         if (this.stss) {
             this.syncPoints = new Set();
             for (let i = 0; i < this.stss.count(); i++) {
@@ -702,8 +712,9 @@ class Mp4SampleReader {
         return this.stco.offset(chunk) + this.readOffset;
     }
     seekPosition(position) {
-        this.timeOffsetEntry = null;
+        this.timeOffsetCursor = null;
         this.lastChunk = this.stsc.sampleToChunk(position);
+        this.timestampCursor = this.stts.getCursor(position);
         this.position = position;
         this.readOffset = 0;
         while (position > 0) {
@@ -722,22 +733,20 @@ class Mp4SampleReader {
     readSampleInfo() {
         let timeOffset = null;
         if (this.ctts != null) {
-            if (this.timeOffsetEntry == null) {
-                this.timeOffsetEntry = this.ctts.sampleToOffsetEntry(this.position);
-            } else if (this.timeOffsetEntry[1] == 0) {
-                this.timeOffsetEntry[0]++;
-                this.timeOffsetEntry[1] = this.ctts.count1(this.timeOffsetEntry[0]);
+            if (this.timeOffsetCursor == null) {
+                this.timeOffsetCursor = this.ctts.getCursor(this.position);
             }
-            this.timeOffsetEntry[1]--;
-            timeOffset = this.ctts.offset(this.timeOffsetEntry[0]);
+            timeOffset = this.ctts.offset(this.timeOffsetCursor[0]);
+            this.ctts.next(this.timeOffsetCursor);
         }
         let sampleInfo = {
-            timestamp: this.stts.sampleToTime(this.position),
+            timestamp: this.timestampCursor[0],
             timeOffset: timeOffset,
             syncPoint: this.isSyncPoint(this.position),
             size: this.stsz.sampleSize(this.position),
             offset: this.dataOffset(),
         };
+        this.stts.next(this.timestampCursor);
         this.readOffset += sampleInfo.size;
         this.position++;
         return sampleInfo;
