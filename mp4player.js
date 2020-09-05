@@ -68,7 +68,7 @@ class BufferedReader {
         while (this._currentRemainings <= 0 && this.buffers.length > 0) {
             this._currentBufferOffset += this._currentBuffer ? this._currentBuffer.byteLength : 0;
             this._currentBuffer = this.buffers.shift();
-            this._currentDataView = new DataView(this._currentBuffer.buffer);
+            this._currentDataView = null;
             this._currentRemainings += this._currentBuffer.byteLength;
         }
     }
@@ -78,6 +78,7 @@ class BufferedReader {
         }
         this._updateCurrentBuffer();
         if (this._currentRemainings >= n) {
+            this._currentDataView = this._currentDataView || new DataView(this._currentBuffer.buffer);
             return [this._currentDataView, this._move(n)];
         }
         this.readBytesTo(this._tmpBytes, 0, n);
@@ -337,21 +338,29 @@ class BoxSTSC extends FullBufBox {
     count() { return this.r32(0); }
     first(n) { return this.r32(4 + n * 12); }
     spc(n) { return this.r32(4 + n * 12 + 4); }
-    sampleToChunk(n) { // n: [0..(numSample-1)]
-        let ofs = 0;
-        let ch = 1;
-        let lch = 1;
-        let lspc = 1;
+    getCursor(n) { // n: [0..(numSample-1)]
+        let ofs = 0, ch = 1, lch = 1, lspc = 1;
         let c = this.count();
-        for (let i = 0; i < c; i++) {
-            let first = this.first(i), spc = this.spc(i);
+        let i = 0;
+        for (; i < c; i++) {
+            let first = this.first(i);
+            ch = lch + ((n - ofs) / lspc | 0);
+            if (first > ch) break;
             ofs += (first - lch) * lspc;
-            if (n < ofs) break;
-            ch = first + ((n - ofs) / spc | 0);
-            lspc = spc;
+            lspc = this.spc(i);
             lch = first;
         }
-        return ch - 1;
+        return [ch - 1, ofs + (ch - lch + 1) * lspc - n, i - 1, 0]; // [chunk, scount, entry, offset]
+    }
+    next(c) {
+        if (--c[1] == 0) {
+            c[0]++;
+            c[3] = 0;
+            if (c[2] + 1 < this.count() && c[0] + 1 >= this.first(c[2] + 1)) {
+                c[2]++;
+            }
+            c[1] = this.spc(c[2]);
+        }
     }
 }
 
@@ -690,10 +699,9 @@ class Mp4SampleReader {
         let mdhd = track.findByType('mdhd');
         this.timeScale = mdhd.version ? mdhd.r32(16) : mdhd.r32(8); // TODO
         this.position = 0;
-        this.readOffset = 0;
-        this.lastChunk = -1;
         this.timeOffsetCursor = null;
         this.timestampCursor = this.stts.getCursor(this.position);
+        this.chunkCursor = this.stsc.getCursor(this.position);
         if (this.stss) {
             this.syncPoints = new Set();
             for (let i = 0; i < this.stss.count(); i++) {
@@ -703,24 +711,15 @@ class Mp4SampleReader {
     }
     isEos() { return this.position >= this.stsz.count(); }
     isSyncPoint(position) { return this.syncPoints == null || this.syncPoints.has(position + 1); }
-    dataOffset() {
-        let chunk = this.stsc.sampleToChunk(this.position);
-        if (this.lastChunk != chunk) {
-            this.lastChunk = chunk;
-            this.readOffset = 0;
-        }
-        return this.stco.offset(chunk) + this.readOffset;
-    }
+    dataOffset() { return this.stco.offset(this.chunkCursor[0]) + this.chunkCursor[3]; }
     seekPosition(position) {
-        this.timeOffsetCursor = null;
-        this.lastChunk = this.stsc.sampleToChunk(position);
+        this.chunkCursor = this.stsc.getCursor(position);
         this.timestampCursor = this.stts.getCursor(position);
+        this.timeOffsetCursor = null;
         this.position = position;
-        this.readOffset = 0;
-        while (position > 0) {
+        while (position > 0 && this.stsc.getCursor(position - 1)[0] == this.chunkCursor[0]) {
             position--;
-            if (this.stsc.sampleToChunk(position) != this.lastChunk) break;
-            this.readOffset += this.stsz.sampleSize(position);
+            this.chunkCursor[3] += this.stsz.sampleSize(position);
         }
     }
     seek(t) {
@@ -746,8 +745,9 @@ class Mp4SampleReader {
             size: this.stsz.sampleSize(this.position),
             offset: this.dataOffset(),
         };
+        this.chunkCursor[3] += sampleInfo.size;
+        this.stsc.next(this.chunkCursor);
         this.stts.next(this.timestampCursor);
-        this.readOffset += sampleInfo.size;
         this.position++;
         return sampleInfo;
     }
@@ -796,12 +796,12 @@ class MP4FragmentBuilder {
         moof.children.push(mfhd);
         moof.children.push(traf);
         let mdat = new GenericBox('mdat', this.totalSize + 8);
-        this.samples.forEach(sample => {
+        for (let sample of this.samples) {
             trun.add(sample.size);
             trun.add(sample.syncPoint ? SAMPLE_FLAGS_SYNC : SAMPLE_FLAGS_NO_SYNC);
             trun.add(sample.timeOffset);
             mdat.data.push(data.slice(sample.offset - offset, sample.offset - offset + sample.size));
-        });
+        }
         trun.dataOffset = moof.updateSize() + 8;
 
         dstBox.children.push(moof);
