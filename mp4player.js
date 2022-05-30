@@ -1,4 +1,4 @@
-"use strict";
+'use strict';
 class BufferedReader {
     constructor(options = {}) {
         this.reader = options.reader || null;
@@ -323,7 +323,7 @@ class FullBufBox extends FullBox {
     }
     r64(pos) {
         let h = this.dataView.getUint32(pos);
-        let l = this.dataView.getUint32(pos);
+        let l = this.dataView.getUint32(pos + 4);
         return 2 ** 32 * h + l;
     }
     w8(pos, v) {
@@ -434,7 +434,7 @@ class BoxSTCO extends FullBufBox {
         super(type, size);
     }
     count() { return this.r32(0); }
-    offset(n) { return this.r32(4 + n * 4); }
+    offset(n) { return this.type == 'co64' ? this.r64(4 + n * 8) : this.r32(4 + n * 4); }
 }
 
 class BoxSTSS extends FullBufBox {
@@ -671,7 +671,7 @@ const SAMPLE_FLAGS_SYNC = 0x02000000;
 const CONTAINER_BOX = new Set(["moov", "trak", "dts\0", "mdia", "minf", "stbl", "udta", "moof", "traf", "edts", "mvex"]);
 const BOXES = {
     "stco": BoxSTCO, "stsc": BoxSTSC, "stsz": BoxSTSZ, "stss": BoxSTSS, "stts": BoxSTTS, "ctts": BoxCTTS,
-    "tfdt": BoxTFDT, "trex": BoxTREX, "trun": BoxTRUN, "mdhd": FullBufBox, "stsd": FullBufBox,
+    "tfdt": BoxTFDT, "trex": BoxTREX, "trun": BoxTRUN, "mdhd": FullBufBox, "stsd": FullBufBox, "co64": BoxSTCO
 };
 
 class MP4Container extends SimpleBoxList {
@@ -693,7 +693,7 @@ class Mp4SampleReader {
         this.stsc = track.findByType('stsc');
         this.stss = track.findByType('stss');
         this.stsz = track.findByType('stsz');
-        this.stco = track.findByType('stco');
+        this.stco = track.findByType('stco') || track.findByType('co64');
         this.stts = track.findByType('stts');
         this.ctts = track.findByType('ctts');
         let mdhd = track.findByType('mdhd');
@@ -824,11 +824,11 @@ class MP4SegmentReader {
     async readSegment(br) {
         let output = new MP4Container();
         if (this.fragmentedInput) {
-            let b1 = await perser.parseBox(br); // moof
-            let b2 = await perser.parseBox(br); // mdat
+            let b1 = await this._perser.parseBox(br); // moof
+            let b2 = await this._perser.parseBox(br); // mdat
             b1 && output.children.push(b1);
             b2 && output.children.push(b2);
-            segmentSeq++;
+            this._segmentSeq++;
         } else if (this._readers.length == 0) {
             let b;
             while ((b = await this._perser.peekNextBox(br)) !== null) {
@@ -947,7 +947,6 @@ class MP4Player extends MP4SegmentReader {
             throw 'cannnot read init segment';
         }
 
-        console.log(this.mimeType);
         if (!MediaSource.isTypeSupported(this.mimeType)) {
             throw 'Unsupported MIME type or codec: ' + this.mimeType;
         }
