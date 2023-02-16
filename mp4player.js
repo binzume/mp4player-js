@@ -846,8 +846,9 @@ class MP4SegmentReader {
                 await this._perser.parseBox(br);
                 if (b.type == 'moov') {
                     let tracks = b.findByTypeAll("trak", []);
-                    this._readers = tracks.map(t => new Mp4SampleReader(t));
-                    this.codecs = this._getCodecs(tracks);
+                    let filteredTracks = tracks.filter(t => this._getCodec(t) != 'text'); // ignore text track
+                    this._readers = filteredTracks.map(t => new Mp4SampleReader(t));
+                    this.codecs = filteredTracks.map(t => this._getCodec(t));
                     this.mimeType = 'video/mp4; codecs="' + this.codecs.join(",") + '"';
                     this._clearMoov(b, tracks);
                 }
@@ -899,21 +900,19 @@ class MP4SegmentReader {
         this._readers.forEach(r => r.seek(t * r.timeScale));
         this._segmentSeq = t / this.segmentDuration * this._readers.length;
     }
-    _getCodecs(tracks) {
-        return tracks.map(t => {
-            let stsd = t.findByType("stsd");
-            let configSize = stsd.r32(4);
-            let c = String.fromCharCode(stsd.r8(8), stsd.r8(9), stsd.r8(10), stsd.r8(11));
-            if (c == 'mp4a') {
-                c += '.40.2';
-            } else if (c == 'avc1') {
-                // TODO: parse config
-                if (configSize >= 0x67 - 8) {
-                    c += '.' + (stsd.r32(0x63) >> 8).toString(16);
-                }
+    _getCodec(t) {
+        let stsd = t.findByType("stsd");
+        let configSize = stsd.r32(4);
+        let c = String.fromCharCode(stsd.r8(8), stsd.r8(9), stsd.r8(10), stsd.r8(11));
+        if (c == 'mp4a') {
+            c += '.40.2';
+        } else if (c == 'avc1') {
+            // TODO: parse config
+            if (configSize >= 0x67 - 8) {
+                c += '.' + (stsd.r32(0x63) >> 8).toString(16);
             }
-            return c;
-        });
+        }
+        return c;
     }
     _clearMoov(moov, tracks = null) {
         tracks = tracks || moov.findByTypeAll("trak", []);
