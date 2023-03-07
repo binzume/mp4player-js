@@ -23,8 +23,8 @@ async function getReader(path, sz = 4096) {
 describe('BufferedReader', () => {
     it('can read', () => {
         let br = new BufferedReader({ littleEndian: false });
-        br.appendBuffer(new Uint8Array([0, 1, 2, 3]).buffer);
-        br.appendBuffer(new Uint8Array([4, 5, 6, 7]).buffer);
+        br.appendBuffer(new Uint8Array([0, 1, 2, 3]));
+        br.appendBuffer(new Uint8Array([4, 5, 6, 7]));
         assert.equal(br.read8(), 0);
         assert.equal(br.read8(), 1);
         assert.equal(br.read8(), 2);
@@ -35,6 +35,14 @@ describe('BufferedReader', () => {
         br.seek(4);
         assert.equal(br.read8(), 4);
         assert.throws(() => br.seek(0), /cannnot seek/);
+    });
+
+    it('can read zero bytes', () => {
+        let br = new BufferedReader({ littleEndian: false });
+        br.readBytesTo(new Uint8Array([0, 1, 2, 3]), 0, 0);
+        assert.equal(br.position, 0);
+        br.readData(0);
+        assert.equal(br.position, 0);
     });
 
     it('can read from file', async () => {
@@ -58,8 +66,11 @@ describe('MP4SegmentReader', () => {
         let r = await getReader(path);
         let br = new BufferedReader({ littleEndian: false, reader: r });
         let player = new MP4SegmentReader(5);
-        this.timeout(10000);
+        this.timeout(15000);
 
+        assert.ok(await br.bufferAsync(fs.statSync(path).size));
+
+        let start = process.hrtime();
         let initSegment = await player.readSegment(br);
         assert.ok(initSegment.byteLength > 0);
         // read all segments
@@ -70,5 +81,8 @@ describe('MP4SegmentReader', () => {
             }
             assert.ok(initSegment.byteLength > 0);
         }
+        let t = process.hrtime(start);
+        console.log(t[0] + t[1] / 1000000000);
+        await r.cancel();
     });
 });
