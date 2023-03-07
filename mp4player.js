@@ -846,7 +846,10 @@ class MP4SegmentReader {
                 await this._perser.parseBox(br);
                 if (b.type == 'moov') {
                     let tracks = b.findByTypeAll("trak", []);
-                    let filteredTracks = tracks.filter(t => this._getCodec(t) != 'text'); // ignore text track
+                    let filteredTracks = tracks.filter(t => {
+                        let c = this._getCodec(t);
+                        return c != 'text' && c != 'tmcd'; // ignore text track
+                    });
                     this._readers = filteredTracks.map(t => new Mp4SampleReader(t));
                     this.codecs = filteredTracks.map(t => this._getCodec(t));
                     this.mimeType = 'video/mp4; codecs="' + this.codecs.join(",") + '"';
